@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "removeComments": true,
+    "esModuleInterop": true,
+    "target": "es2022",
+    "outDir": "bundle",
+    "strict": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "front", "bundle"]
+}
