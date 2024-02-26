@@ -88,3 +88,29 @@ export type StartGameData = {
   ships: Ship[];
   currentPlayerIndex: number;
 };
+
+export type AttackRequestData = {
+  readonly gameId: number;
+  readonly x: number;
+  readonly y: number;
+  readonly indexPlayer: number;
+};
+
+export type RandomRequestData = Pick<
+  AttackRequestData,
+  'gameId' | 'indexPlayer'
+>;
+
+export type AttackData = {
+  readonly position: Position;
+  readonly currentPlayer: number;
+  readonly status: AttackStatus;
+};
+
+export type AttackStatus = 'miss' | 'killed' | 'shot';
+
+export type AttackResult = {
+  gameIndex: number;
+  status: AttackStatus;
+  damagedShip?: Ship;
+};

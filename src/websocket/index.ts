@@ -1,20 +1,29 @@
 import WebSocket from 'ws';
-import { getRandomUUID } from './utils';
+import { getRandomNumber, getRandomUUID } from './utils';
 import {
   AddShipsData,
   AddToRoomData,
+  AttackData,
+  AttackRequestData,
+  AttackResult,
   AuthData,
   CreateGameData,
   FinishGameData,
   Game,
   Message,
+  PlayerInGame,
+  Position,
+  RandomRequestData,
   RegistrationData,
   Room,
+  Ship,
   StartGameData,
   User,
 } from './types';
 
 export class BattleshipServer {
+  private boardSize = 10;
+
   private usersIds: number = 0;
   private roomsIds: number = 0;
   private gamesIds: number = 0;
@@ -112,7 +121,21 @@ export class BattleshipServer {
           }
           break;
         }
-
+        case 'attack': {
+          const data: AttackRequestData = JSON.parse(messageRawParsed.data);
+          this.attack(data);
+          break;
+        }
+        case 'randomAttack': {
+          const data: RandomRequestData = JSON.parse(messageRawParsed.data);
+          const randomPosition = this.generateRandomAttackPosition(data);
+          const fullAttackData: AttackRequestData = {
+            ...randomPosition,
+            ...data,
+          };
+          this.attack(fullAttackData);
+          break;
+        }
         default: {
           console.warn('Received unknown request type');
           break;
@@ -443,6 +466,51 @@ export class BattleshipServer {
     });
   }
 
+  private addWinToUser(userId: number): void {
+    const user = this.users.find((user) => user.index === userId);
+
+    if (!user) {
+      throw Error(`addWinToUser: user ${userId} does not exist`);
+    }
+
+    ++user.wins;
+  }
+
+  private generateRandomAttackPosition(data: RandomRequestData): Position {
+    const game = this.games.find((game) => game.id === data.gameId);
+
+    if (!game) {
+      throw Error('generateRandomAttackPosition: game not found by id');
+    }
+
+    const player = game.players.find(
+      (player) => player.index === data.indexPlayer
+    );
+
+    if (!player) {
+      throw Error('generateRandomAttackPosition: player not found by id');
+    }
+
+    const wasPositionAlreadyUsed = (position: Position): boolean => {
+      return player.attacks.some(
+        (attack) => attack.x === position.x && attack.y === position.y
+      );
+    };
+
+    const maxCoordinate = this.boardSize - 1;
+    const minCoordinate = 0;
+
+    let x: number = getRandomNumber(minCoordinate, maxCoordinate);
+    let y: number = getRandomNumber(minCoordinate, maxCoordinate);
+
+    while (wasPositionAlreadyUsed({ x, y })) {
+      x = getRandomNumber(minCoordinate, maxCoordinate);
+      y = getRandomNumber(minCoordinate, maxCoordinate);
+    }
+
+    return { x, y };
+  }
+
   private addShips(data: AddShipsData): number {
     const gameIndex = this.games.findIndex((game) => game.id === data.gameId);
 
@@ -490,6 +558,248 @@ export class BattleshipServer {
 
       socket.send(JSON.stringify(message));
     });
+  }
+
+  private attack(data: AttackRequestData): void {
+    const attackResult = this.shootAtShip(data);
+    if (attackResult) {
+      if (attackResult.status === 'killed' && attackResult.damagedShip) {
+        this.setMissStateAfterShipKill(
+          attackResult.gameIndex,
+          attackResult.damagedShip
+        );
+
+        if (this.didCurrentPlayerWin(attackResult.gameIndex)) {
+          this.addWinToUser(this.games[attackResult.gameIndex].turn);
+          this.finishGame(attackResult.gameIndex);
+          this.updateWinners();
+        }
+        return;
+      }
+
+      this.switchTurn(attackResult.gameIndex, attackResult.status !== 'miss');
+    }
+  }
+
+  private shootAtShip(data: AttackRequestData): null | AttackResult {
+    const gameIndex = this.gameIndexById(data.gameId);
+
+    if (gameIndex < 0) {
+      throw Error('attack: game not found');
+    }
+
+    if (data.indexPlayer !== this.games[gameIndex].turn) {
+      return null;
+    }
+
+    const game = this.games[gameIndex];
+
+    const enemyIndex: 0 | 1 =
+      game.players[0].index === data.indexPlayer ? 1 : 0;
+    const selfIndex: 0 | 1 = game.players[0].index === data.indexPlayer ? 0 : 1;
+
+    if (
+      game.players[selfIndex].attacks.find(
+        (a) => a.y === data.y && a.x === data.x
+      )
+    ) {
+      return null;
+    }
+
+    const attackStatus = this.detectAttackStatus(
+      game.players[enemyIndex],
+      data.x,
+      data.y
+    );
+
+    const attackResponseData: AttackData = {
+      position: { x: data.x, y: data.y },
+      status: attackStatus.status,
+      currentPlayer: data.indexPlayer,
+    };
+
+    const response: Message = {
+      type: 'attack',
+      id: 0,
+      data: JSON.stringify(attackResponseData),
+    };
+    const responseString = JSON.stringify(response);
+
+    console.log('Message sent: attack');
+    game.players.forEach((player) => {
+      const client = this.findSocket(player.index);
+
+      if (!client) {
+        throw Error('createGame: client not found');
+      }
+
+      client.send(responseString);
+    });
+
+    this.games[gameIndex].players[selfIndex].attacks.push({
+      x: data.x,
+      y: data.y,
+    });
+
+    return {
+      gameIndex: gameIndex,
+      status: attackStatus.status,
+      damagedShip: attackStatus.damagedShip,
+    };
+  }
+
+  private detectAttackStatus(
+    playerInGame: PlayerInGame,
+    attackX: number,
+    attackY: number
+  ): Omit<AttackResult, 'gameIndex'> {
+    for (const ship of playerInGame.ships) {
+      if (!(ship.position.x === attackX || ship.position.y === attackY)) {
+        continue;
+      }
+
+      if (ship.direction && ship.position.x === attackX) {
+        for (let y = ship.position.y; y < ship.position.y + ship.length; ++y) {
+          if (y === attackY) {
+            ship.aliveCells[y - ship.position.y] = false;
+
+            if (ship.aliveCells.every((cell) => !cell)) {
+              return { status: 'killed', damagedShip: ship };
+            } else {
+              return { status: 'shot', damagedShip: ship };
+            }
+          }
+        }
+      } else if (!ship.direction && ship.position.y === attackY) {
+        for (let x = ship.position.x; x < ship.position.x + ship.length; ++x) {
+          if (x === attackX) {
+            ship.aliveCells[x - ship.position.x] = false;
+
+            if (ship.aliveCells.every((cell) => !cell)) {
+              return { status: 'killed', damagedShip: ship };
+            } else {
+              return { status: 'shot', damagedShip: ship };
+            }
+          }
+        }
+      }
+    }
+
+    return { status: 'miss' };
+  }
+
+  private setMissStateAfterShipKill(
+    gameIndex: number,
+    damagedShip: Ship
+  ): void {
+    const game = this.games[gameIndex];
+    const currentTurn = game.turn;
+    const playerIndexInGameArray = game.players.findIndex(
+      (player) => player.index === currentTurn
+    );
+
+    if (playerIndexInGameArray < 0) {
+      throw new Error(
+        'setMissStateAfterShipKill: can not find player by his turn'
+      );
+    }
+
+    const self = game.players[playerIndexInGameArray].index;
+
+    const positions = this.generateMissesAroundKilledShip(damagedShip);
+    game.players[playerIndexInGameArray].attacks.push(...positions);
+
+    console.log('Message sent: setting missed state after killed ship');
+
+    game.players.forEach((player) => {
+      const client = this.findSocket(player.index);
+
+      if (!client) {
+        throw Error('createGame: client not found');
+      }
+
+      positions.forEach((position) => {
+        const attackResponseData: AttackData = {
+          position: { x: position.x, y: position.y },
+          status: 'miss',
+          currentPlayer: self,
+        };
+
+        const message: Message = {
+          type: 'attack',
+          id: 0,
+          data: JSON.stringify(attackResponseData),
+        };
+
+        client.send(JSON.stringify(message));
+      });
+    });
+  }
+
+  private generateMissesAroundKilledShip(ship: Ship): Position[] {
+    const positions: Position[] = [];
+    const isValidPosition = (position: Position) => {
+      return (
+        position.x >= 0 &&
+        position.x < this.boardSize &&
+        position.y >= 0 &&
+        position.y < this.boardSize
+      );
+    };
+    let shipX;
+    let shipY;
+    if (ship.direction) {
+      shipY = ship.position.y;
+      shipX = ship.position.x;
+      for (let x = shipX - 1; x <= shipX + 1; ++x) {
+        if (isValidPosition({ x, y: shipY - 1 })) {
+          positions.push({ x, y: shipY - 1 });
+        }
+      }
+      for (let y = shipY; y < shipY + ship.length; ++y) {
+        if (isValidPosition({ y, x: shipX - 1 })) {
+          positions.push({ y, x: shipX - 1 });
+        }
+
+        if (isValidPosition({ y, x: shipX + 1 })) {
+          positions.push({ y, x: shipX + 1 });
+        }
+      }
+      for (let x = shipX - 1; x <= shipX + 1; ++x) {
+        if (isValidPosition({ x, y: shipY + ship.length })) {
+          positions.push({ x, y: shipY + ship.length });
+        }
+      }
+    } else if (!ship.direction) {
+      shipY = ship.position.y;
+      shipY = ship.position.y;
+      shipX = ship.position.x;
+      for (let y = shipY - 1; y <= shipY + 1; ++y) {
+        if (isValidPosition({ y, x: shipX - 1 })) {
+          positions.push({ y, x: shipX - 1 });
+        }
+      }
+      for (let x = shipX; x < shipX + ship.length; ++x) {
+        if (isValidPosition({ x, y: shipY - 1 })) {
+          positions.push({ x, y: shipY - 1 });
+        }
+
+        if (isValidPosition({ x, y: shipY + 1 })) {
+          positions.push({ x, y: shipY + 1 });
+        }
+      }
+      for (let y = shipY - 1; y <= shipY + 1; ++y) {
+        if (isValidPosition({ y, x: shipX + ship.length })) {
+          positions.push({ y, x: shipX + ship.length });
+        }
+      }
+    }
+
+    return positions;
+  }
+
+  private gameIndexById(id: number) {
+    return this.games.findIndex((game) => game.id === id);
   }
 
   private switchTurn(gameIndex: number, skipSwitching: boolean = false): void {
