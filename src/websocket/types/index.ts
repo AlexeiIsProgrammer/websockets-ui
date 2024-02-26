@@ -28,7 +28,53 @@ export type Message = {
   id: 0;
 };
 
-export interface RegistrationData extends Omit<User, 'password' | 'wins'> {
+export type RegistrationData = {
   error: boolean;
   errorText: string;
-}
+} & Omit<User, 'password' | 'wins'>;
+
+export type UserInRoom = Pick<User, 'index'> & Pick<AuthData, 'name'>;
+export type Room = {
+  roomUsers: UserInRoom[];
+  roomId: number;
+};
+
+export type Position = {
+  x: number;
+  y: number;
+};
+
+export type ShipSize = 'small' | 'medium' | 'large' | 'huge';
+
+export type Ship = {
+  position: Position;
+  direction: boolean;
+  length: number;
+  type: ShipSize;
+  aliveCells: boolean[];
+};
+
+export type PlayerInGame = {
+  index: number;
+  ships: Ship[];
+  attacks: Position[];
+};
+export type Game = {
+  id: number;
+  players: [PlayerInGame, PlayerInGame];
+  turn: number;
+  isFinished: boolean;
+};
+
+export type CreateGameData = {
+  idGame: number;
+  idPlayer: number;
+};
+
+export type AddToRoomData = {
+  indexRoom: number;
+};
+
+export type FinishGameData = {
+  winPlayer: number;
+};
