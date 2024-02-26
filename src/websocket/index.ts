@@ -24,6 +24,18 @@ import {
 export class BattleshipServer {
   private boardSize = 10;
 
+  private botWs = {
+    userIndex: -1,
+    send: () => {},
+  } as unknown as WebSocket.WebSocket & { userIndex: number };
+
+  private bot = {
+    index: -1,
+    name: 'Bot',
+    password: 'Bot',
+    wins: -1,
+  };
+
   private usersIds: number = 0;
   private roomsIds: number = 0;
   private gamesIds: number = 0;
@@ -31,7 +43,7 @@ export class BattleshipServer {
   private wsServer!: WebSocket.Server;
   private isServerStarted: boolean = false;
 
-  private readonly users: User[] = [];
+  private readonly users: User[] = [this.bot];
   private readonly rooms: Room[] = [];
   private readonly games: Game[] = [];
 
@@ -136,6 +148,12 @@ export class BattleshipServer {
           this.attack(fullAttackData);
           break;
         }
+        case 'single_play':
+          this.gameWithBot(
+            socket as WebSocket.WebSocket & { userIndex: number },
+            messageRawParsed
+          );
+          break;
         default: {
           console.warn('Received unknown request type');
           break;
@@ -362,9 +380,14 @@ export class BattleshipServer {
     });
 
     [player1, player2].forEach((player) => {
-      const socket = this.findSocket(player);
-      if (!socket) {
-        throw Error('createGame: socket not found');
+      let socket;
+      if (player === -1) {
+        socket = this.botWs;
+      } else {
+        socket = this.findSocket(player);
+        if (!socket) {
+          throw Error('createGame: socket not found');
+        }
       }
 
       const data: CreateGameData = { idGame: id, idPlayer: player };
@@ -840,4 +863,58 @@ export class BattleshipServer {
       socket.send(responseString);
     });
   }
+
+  private gameWithBot = (
+    ws: WebSocket.WebSocket & { userIndex: number },
+    request: Message
+  ) => {
+    switch (request.type) {
+      case 'single_play': {
+        console.log('The user_s bot game has begun');
+        this.startSingleGame(ws);
+        break;
+      }
+      case 'add_ships': {
+        const data: AddShipsData = JSON.parse(request.data);
+        this.startAttack(data);
+        break;
+      }
+      case 'attack': {
+        const data: AttackRequestData = JSON.parse(request.data);
+        this.attack(data);
+        break;
+      }
+      case 'randomAttack': {
+        const data: RandomRequestData = JSON.parse(request.data);
+        const randomPosition = this.generateRandomAttackPosition(data);
+        const fullAttackData: AttackRequestData = {
+          ...randomPosition,
+          ...data,
+        };
+        this.attack(fullAttackData);
+        break;
+      }
+    }
+  };
+
+  private startSingleGame = (
+    ws: WebSocket.WebSocket & { userIndex: number }
+  ) => {
+    this.createRoom(ws);
+    console.log(this.rooms);
+    console.log(this.roomsIds);
+
+    const ind = this.addToRoom(this.botWs, { indexRoom: this.roomsIds - 1 });
+    this.createGame(ind);
+  };
+
+  private startAttack = (data: AddShipsData) => {
+    const botField = this.generateRandomAttackPosition(data);
+    const game = this.games.find((game) => game.id === data.gameId);
+    game?.players[0].index === -1
+      ? game?.players[0].attacks.push(botField)
+      : game?.players[1].attacks.push(botField);
+
+    this.startGame(data.gameId);
+  };
 }

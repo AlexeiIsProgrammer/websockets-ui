@@ -20,7 +20,8 @@ export type TypeOfMessage =
   | 'randomAttack'
   | 'finish'
   | 'update_room'
-  | 'update_winners';
+  | 'update_winners'
+  | 'single_play';
 
 export type Message = {
   type: TypeOfMessage;
