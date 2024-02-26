@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { getRandomUUID } from './utils';
 import {
+  AddShipsData,
   AddToRoomData,
   AuthData,
   CreateGameData,
@@ -9,6 +10,7 @@ import {
   Message,
   RegistrationData,
   Room,
+  StartGameData,
   User,
 } from './types';
 
@@ -51,7 +53,7 @@ export class BattleshipServer {
       });
 
       newSocket.on('message', (message): void => {
-        this.processClientMessage(socket, message);
+        this.processSocketMessage(socket, message);
       });
 
       newSocket.on('close', () => {
@@ -65,8 +67,8 @@ export class BattleshipServer {
     });
   }
 
-  private processClientMessage(
-    client: WebSocket.WebSocket,
+  private processSocketMessage(
+    socket: WebSocket.WebSocket,
     message: WebSocket.RawData
   ): void {
     try {
@@ -76,12 +78,12 @@ export class BattleshipServer {
       switch (messageRawParsed.type) {
         case 'reg': {
           const data: AuthData = JSON.parse(messageRawParsed.data);
-          this.processReg(data, client);
+          this.processReg(data, socket);
           break;
         }
         case 'create_room': {
           this.createRoom(
-            client as WebSocket.WebSocket & { userIndex: number }
+            socket as WebSocket.WebSocket & { userIndex: number }
           );
           this.sendFreeRooms();
           break;
@@ -89,12 +91,25 @@ export class BattleshipServer {
         case 'add_user_to_room': {
           const data: AddToRoomData = JSON.parse(messageRawParsed.data);
           const roomIndex = this.addToRoom(
-            client as WebSocket.WebSocket & { userIndex: number },
+            socket as WebSocket.WebSocket & { userIndex: number },
             data
           );
           this.sendFreeRooms();
           this.createGame(roomIndex);
 
+          break;
+        }
+
+        case 'add_ships': {
+          const data: AddShipsData = JSON.parse(messageRawParsed.data);
+          const gameIndex = this.addShips(data);
+          if (
+            this.games[gameIndex].players.every((p) => p.ships.length !== 0)
+          ) {
+            console.log('Start the game');
+            this.startGame(gameIndex);
+            this.switchTurn(gameIndex);
+          }
           break;
         }
 
@@ -324,9 +339,9 @@ export class BattleshipServer {
     });
 
     [player1, player2].forEach((player) => {
-      const client = this.findClient(player);
-      if (!client) {
-        throw Error('createGame: client not found');
+      const socket = this.findSocket(player);
+      if (!socket) {
+        throw Error('createGame: socket not found');
       }
 
       const data: CreateGameData = { idGame: id, idPlayer: player };
@@ -335,11 +350,11 @@ export class BattleshipServer {
         id: 0,
         data: JSON.stringify(data),
       };
-      client.send(JSON.stringify(message));
+      socket.send(JSON.stringify(message));
     });
   }
 
-  private findClient(index: number): WebSocket.WebSocket | undefined {
+  private findSocket(index: number): WebSocket.WebSocket | undefined {
     return [...this.wsServer.clients.values()].find(
       (ws) =>
         (ws as WebSocket.WebSocket & { userIndex: number }).userIndex === index
@@ -394,6 +409,125 @@ export class BattleshipServer {
 
     return game.players[enemyIndexInArray].ships.every((ship) => {
       return ship.aliveCells.every((cell) => !cell);
+    });
+  }
+
+  private finishGame(gameIndex: number, draw = false): void {
+    const game = this.games[gameIndex];
+
+    if (game?.isFinished) {
+      return;
+    }
+
+    const winner = !draw ? game.turn : -1;
+
+    const finishMessage: FinishGameData = { winPlayer: winner };
+    const response: Message = {
+      type: 'finish',
+      data: JSON.stringify(finishMessage),
+      id: 0,
+    };
+    const responseString = JSON.stringify(response);
+
+    game.isFinished = true;
+
+    console.log('Message sent: finishing game');
+
+    game.players.forEach((player) => {
+      const socket = this.findSocket(player.index);
+      if (!socket) {
+        return;
+      }
+
+      socket.send(responseString);
+    });
+  }
+
+  private addShips(data: AddShipsData): number {
+    const gameIndex = this.games.findIndex((game) => game.id === data.gameId);
+
+    if (gameIndex < 0) {
+      throw Error(`Game with id ${data.gameId} not found`);
+    }
+
+    const playerIndex = this.games[gameIndex].players.findIndex(
+      (p) => p.index === data.indexPlayer
+    );
+
+    if (playerIndex < 0) {
+      throw Error(`addShips: Player with id ${data.indexPlayer} not found`);
+    }
+
+    this.games[gameIndex].players[playerIndex].ships.push(
+      ...data.ships.map((ship) => ({
+        ...ship,
+        aliveCells: new Array(ship.length).fill(true),
+      }))
+    );
+
+    return gameIndex;
+  }
+
+  private startGame(gameIndex: number): void {
+    console.log('Message sent: starting game');
+
+    this.games[gameIndex].players.forEach((player) => {
+      const socket = this.findSocket(player.index);
+      if (!socket) {
+        throw Error('startGame: WS Socket not found');
+      }
+
+      const data: StartGameData = {
+        currentPlayerIndex: player.index,
+        ships: player.ships,
+      };
+
+      const message: Message = {
+        id: 0,
+        type: 'start_game',
+        data: JSON.stringify(data),
+      };
+
+      socket.send(JSON.stringify(message));
+    });
+  }
+
+  private switchTurn(gameIndex: number, skipSwitching: boolean = false): void {
+    if (gameIndex < 0) {
+      return;
+    }
+    const game = this.games[gameIndex];
+
+    const currentTurn = game.turn;
+
+    if (!skipSwitching) {
+      if (currentTurn === game.players[0].index) {
+        game.turn = game.players[1].index;
+      } else if (currentTurn === game.players[1].index) {
+        game.turn = game.players[0].index;
+      }
+    }
+
+    const newTurn = this.games[gameIndex].turn;
+
+    const responseData: { currentPlayer: number } = { currentPlayer: newTurn };
+    const response: Message = {
+      type: 'turn',
+      id: 0,
+      data: JSON.stringify(responseData),
+    };
+    const responseString = JSON.stringify(response);
+
+    console.log('Message sent: switching turn');
+
+    game.players.forEach((player) => {
+      const socket = this.findSocket(player.index);
+
+      if (!socket) {
+        throw Error('createGame: client not found');
+      }
+
+      socket.send(responseString);
     });
   }
 }

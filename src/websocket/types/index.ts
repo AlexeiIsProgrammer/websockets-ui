@@ -78,3 +78,13 @@ export type AddToRoomData = {
 export type FinishGameData = {
   winPlayer: number;
 };
+
+export type AddShipsData = {
+  readonly gameId: number;
+  readonly ships: Ship[];
+  readonly indexPlayer: number;
+};
+export type StartGameData = {
+  ships: Ship[];
+  currentPlayerIndex: number;
+};
